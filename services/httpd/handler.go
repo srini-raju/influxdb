@@ -99,6 +99,8 @@ type Handler struct {
 	Logger    zap.Logger
 	CLFLogger *log.Logger
 	stats     *Statistics
+
+	requestTracker *RequestTracker
 }
 
 // NewHandler returns a new instance of handler with routes.
@@ -204,6 +206,15 @@ func (h *Handler) Statistics(tags map[string]string) []models.Statistic {
 	}}
 }
 
+// TrackRequests begins tracking requests made to the Handler.
+// This should be called before this Handler is used to serve requests.
+func (h *Handler) TrackRequests() {
+	if h.requestTracker != nil {
+		return
+	}
+	h.requestTracker = NewRequestTracker()
+}
+
 // AddRoutes sets the provided routes on the handler.
 func (h *Handler) AddRoutes(routes ...Route) {
 	for _, r := range routes {
@@ -257,6 +268,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if strings.HasPrefix(r.URL.Path, "/debug/vars") {
 		h.serveExpvar(w, r)
+	} else if strings.HasPrefix(r.URL.Path, "/debug/track-requests") {
+		h.serveTrackRequests(w, r)
 	} else {
 		h.mux.ServeHTTP(w, r)
 	}
@@ -282,6 +295,10 @@ func (h *Handler) serveQuery(w http.ResponseWriter, r *http.Request, user *meta.
 	defer func(start time.Time) {
 		atomic.AddInt64(&h.stats.QueryRequestDuration, time.Since(start).Nanoseconds())
 	}(time.Now())
+
+	if h.requestTracker != nil {
+		h.requestTracker.Add(r, user)
+	}
 
 	// Retrieve the underlying ResponseWriter or initialize our own.
 	rw, ok := w.(ResponseWriter)
@@ -585,6 +602,10 @@ func (h *Handler) serveWrite(w http.ResponseWriter, r *http.Request, user *meta.
 		atomic.AddInt64(&h.stats.WriteRequestDuration, time.Since(start).Nanoseconds())
 	}(time.Now())
 
+	if h.requestTracker != nil {
+		h.requestTracker.Add(r, user)
+	}
+
 	database := r.URL.Query().Get("db")
 	if database == "" {
 		h.httpError(w, "database is required", http.StatusBadRequest)
@@ -832,6 +853,52 @@ func (h *Handler) serveExpvar(w http.ResponseWriter, r *http.Request) {
 		w.Write(bytes.TrimSpace(val))
 	}
 	fmt.Fprintln(w, "\n}")
+}
+
+// serveTrackRequests will track requests for a period of time.
+func (h *Handler) serveTrackRequests(w http.ResponseWriter, r *http.Request) {
+	var d time.Duration
+	if s := r.URL.Query().Get("seconds"); s == "" {
+		h.httpError(w, "missing required seconds parameter", http.StatusBadRequest)
+		return
+	} else if seconds, err := strconv.ParseInt(s, 10, 64); err != nil {
+		h.httpError(w, err.Error(), http.StatusBadRequest)
+		return
+	} else {
+		d = time.Duration(seconds) * time.Second
+	}
+
+	var closing <-chan bool
+	if notifier, ok := w.(http.CloseNotifier); ok {
+		closing = notifier.CloseNotify()
+	}
+
+	profile := h.requestTracker.TrackRequests()
+
+	timer := time.NewTimer(d)
+	select {
+	case <-timer.C:
+		profile.Stop()
+	case <-closing:
+		// Connection was closed early.
+		profile.Stop()
+		timer.Stop()
+		return
+	}
+
+	w.Header().Add("Connection", "close")
+	requests := make(map[string]*RequestStats, len(profile.Requests))
+	for req, st := range profile.Requests {
+		requests[req.String()] = st
+	}
+
+	out, err := json.Marshal(requests)
+	if err != nil {
+		h.httpError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write(out)
 }
 
 // parseSystemDiagnostics converts the system diagnostics into an appropriate
