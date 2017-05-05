@@ -38,6 +38,10 @@ const (
 	//
 	// This has no relation to the number of bytes that are returned.
 	DefaultChunkSize = 10000
+
+	DefaultDebugRequestsInterval = 10 * time.Second
+
+	MaxDebugRequestsInterval = 6 * time.Hour
 )
 
 // AuthenticationMethod defines the type of authentication used.
@@ -106,11 +110,12 @@ type Handler struct {
 // NewHandler returns a new instance of handler with routes.
 func NewHandler(c Config) *Handler {
 	h := &Handler{
-		mux:       pat.New(),
-		Config:    &c,
-		Logger:    zap.New(zap.NullEncoder()),
-		CLFLogger: log.New(os.Stderr, "[httpd] ", 0),
-		stats:     &Statistics{},
+		mux:            pat.New(),
+		Config:         &c,
+		Logger:         zap.New(zap.NullEncoder()),
+		CLFLogger:      log.New(os.Stderr, "[httpd] ", 0),
+		stats:          &Statistics{},
+		requestTracker: NewRequestTracker(),
 	}
 
 	h.AddRoutes([]Route{
@@ -206,15 +211,6 @@ func (h *Handler) Statistics(tags map[string]string) []models.Statistic {
 	}}
 }
 
-// TrackRequests begins tracking requests made to the Handler.
-// This should be called before this Handler is used to serve requests.
-func (h *Handler) TrackRequests() {
-	if h.requestTracker != nil {
-		return
-	}
-	h.requestTracker = NewRequestTracker()
-}
-
 // AddRoutes sets the provided routes on the handler.
 func (h *Handler) AddRoutes(routes ...Route) {
 	for _, r := range routes {
@@ -268,8 +264,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if strings.HasPrefix(r.URL.Path, "/debug/vars") {
 		h.serveExpvar(w, r)
-	} else if strings.HasPrefix(r.URL.Path, "/debug/track-requests") {
-		h.serveTrackRequests(w, r)
+	} else if strings.HasPrefix(r.URL.Path, "/debug/requests") {
+		h.serveDebugRequests(w, r)
 	} else {
 		h.mux.ServeHTTP(w, r)
 	}
@@ -855,17 +851,23 @@ func (h *Handler) serveExpvar(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "\n}")
 }
 
-// serveTrackRequests will track requests for a period of time.
-func (h *Handler) serveTrackRequests(w http.ResponseWriter, r *http.Request) {
+// serveDebugRequests will track requests for a period of time.
+func (h *Handler) serveDebugRequests(w http.ResponseWriter, r *http.Request) {
 	var d time.Duration
 	if s := r.URL.Query().Get("seconds"); s == "" {
-		h.httpError(w, "missing required seconds parameter", http.StatusBadRequest)
-		return
+		d = DefaultDebugRequestsInterval
 	} else if seconds, err := strconv.ParseInt(s, 10, 64); err != nil {
 		h.httpError(w, err.Error(), http.StatusBadRequest)
 		return
 	} else {
 		d = time.Duration(seconds) * time.Second
+		if d > MaxDebugRequestsInterval {
+			h.httpError(w, fmt.Sprintf("exceeded maximum interval time: %s > %s",
+				influxql.FormatDuration(d),
+				influxql.FormatDuration(MaxDebugRequestsInterval)),
+				http.StatusBadRequest)
+			return
+		}
 	}
 
 	var closing <-chan bool
