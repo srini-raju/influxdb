@@ -1,13 +1,12 @@
 package httpd
 
 import (
+	"container/list"
 	"fmt"
-	"math/rand"
 	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/influxdata/influxdb/services/meta"
 )
@@ -31,7 +30,7 @@ func (r *RequestInfo) String() string {
 type RequestProfile struct {
 	Requests map[RequestInfo]*RequestStats
 	tracker  *RequestTracker
-	id       int64
+	elem     *list.Element
 	mu       sync.RWMutex
 }
 
@@ -64,20 +63,18 @@ func (p *RequestProfile) Add(info RequestInfo) {
 // profile.
 func (p *RequestProfile) Stop() {
 	p.tracker.mu.Lock()
-	delete(p.tracker.profiles, p.id)
+	p.tracker.profiles.Remove(p.elem)
 	p.tracker.mu.Unlock()
 }
 
 type RequestTracker struct {
-	profiles map[int64]*RequestProfile
-	rand     *rand.Rand
+	profiles *list.List
 	mu       sync.RWMutex
 }
 
 func NewRequestTracker() *RequestTracker {
 	return &RequestTracker{
-		profiles: make(map[int64]*RequestProfile),
-		rand:     rand.New(rand.NewSource(time.Now().UnixNano())),
+		profiles: list.New(),
 	}
 }
 
@@ -89,22 +86,14 @@ func (rt *RequestTracker) TrackRequests() *RequestProfile {
 	}
 
 	rt.mu.Lock()
-	defer rt.mu.Unlock()
-
-	for {
-		n := rt.rand.Int63()
-		if _, ok := rt.profiles[n]; ok {
-			continue
-		}
-		profile.id = n
-		rt.profiles[n] = profile
-		return profile
-	}
+	profile.elem = rt.profiles.PushBack(profile)
+	rt.mu.Unlock()
+	return profile
 }
 
 func (rt *RequestTracker) Add(req *http.Request, user *meta.UserInfo) {
 	rt.mu.RLock()
-	if len(rt.profiles) == 0 {
+	if rt.profiles.Len() == 0 {
 		rt.mu.RUnlock()
 		return
 	}
@@ -122,7 +111,7 @@ func (rt *RequestTracker) Add(req *http.Request, user *meta.UserInfo) {
 	}
 
 	// Add the request info to the profiles.
-	for _, profile := range rt.profiles {
-		profile.Add(info)
+	for p := rt.profiles.Front(); p != nil; p = p.Next() {
+		p.Value.(*RequestProfile).Add(info)
 	}
 }
