@@ -17,7 +17,8 @@ type RequestInfo struct {
 }
 
 type RequestStats struct {
-	Counter int64 `json:"counter"`
+	Writes  int64 `json:"writes"`
+	Queries int64 `json:"queries"`
 }
 
 func (r *RequestInfo) String() string {
@@ -28,19 +29,28 @@ func (r *RequestInfo) String() string {
 }
 
 type RequestProfile struct {
-	Requests map[RequestInfo]*RequestStats
-	tracker  *RequestTracker
-	elem     *list.Element
+	tracker *RequestTracker
+	elem    *list.Element
+
 	mu       sync.RWMutex
+	Requests map[RequestInfo]*RequestStats
 }
 
-func (p *RequestProfile) Add(info RequestInfo) {
+func (p *RequestProfile) AddWrite(info RequestInfo) {
+	p.add(info, p.addWrite)
+}
+
+func (p *RequestProfile) AddQuery(info RequestInfo) {
+	p.add(info, p.addQuery)
+}
+
+func (p *RequestProfile) add(info RequestInfo, fn func(*RequestStats)) {
 	// Look for a request entry for this request.
 	p.mu.RLock()
 	st, ok := p.Requests[info]
 	p.mu.RUnlock()
 	if ok {
-		atomic.AddInt64(&st.Counter, 1)
+		fn(st)
 		return
 	}
 
@@ -49,14 +59,22 @@ func (p *RequestProfile) Add(info RequestInfo) {
 	if st, ok := p.Requests[info]; ok {
 		// Something else created this entry while we were waiting for the lock.
 		p.mu.Unlock()
-		atomic.AddInt64(&st.Counter, 1)
+		fn(st)
 		return
 	}
 
 	st = &RequestStats{}
 	p.Requests[info] = st
 	p.mu.Unlock()
-	atomic.AddInt64(&st.Counter, 1)
+	fn(st)
+}
+
+func (p *RequestProfile) addWrite(st *RequestStats) {
+	atomic.AddInt64(&st.Writes, 1)
+}
+
+func (p *RequestProfile) addQuery(st *RequestStats) {
+	atomic.AddInt64(&st.Queries, 1)
 }
 
 // Stop informs the RequestTracker to stop collecting statistics for this
@@ -68,8 +86,8 @@ func (p *RequestProfile) Stop() {
 }
 
 type RequestTracker struct {
-	profiles *list.List
 	mu       sync.RWMutex
+	profiles *list.List
 }
 
 func NewRequestTracker() *RequestTracker {
@@ -112,6 +130,11 @@ func (rt *RequestTracker) Add(req *http.Request, user *meta.UserInfo) {
 
 	// Add the request info to the profiles.
 	for p := rt.profiles.Front(); p != nil; p = p.Next() {
-		p.Value.(*RequestProfile).Add(info)
+		profile := p.Value.(*RequestProfile)
+		if req.URL.Path == "/query" {
+			profile.AddQuery(info)
+		} else if req.URL.Path == "/write" {
+			profile.AddWrite(info)
+		}
 	}
 }

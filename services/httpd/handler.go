@@ -291,10 +291,7 @@ func (h *Handler) serveQuery(w http.ResponseWriter, r *http.Request, user *meta.
 	defer func(start time.Time) {
 		atomic.AddInt64(&h.stats.QueryRequestDuration, time.Since(start).Nanoseconds())
 	}(time.Now())
-
-	if h.requestTracker != nil {
-		h.requestTracker.Add(r, user)
-	}
+	h.requestTracker.Add(r, user)
 
 	// Retrieve the underlying ResponseWriter or initialize our own.
 	rw, ok := w.(ResponseWriter)
@@ -597,10 +594,7 @@ func (h *Handler) serveWrite(w http.ResponseWriter, r *http.Request, user *meta.
 		atomic.AddInt64(&h.stats.ActiveWriteRequests, -1)
 		atomic.AddInt64(&h.stats.WriteRequestDuration, time.Since(start).Nanoseconds())
 	}(time.Now())
-
-	if h.requestTracker != nil {
-		h.requestTracker.Add(r, user)
-	}
+	h.requestTracker.Add(r, user)
 
 	database := r.URL.Query().Get("db")
 	if database == "" {
